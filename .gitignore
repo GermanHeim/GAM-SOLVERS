@@ -1,3 +1,4 @@
 /target
 AlphaECP_files
 *.html
+generated.rs

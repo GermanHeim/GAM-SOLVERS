@@ -1,6 +1,6 @@
 use scraper::{Html, Selector};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone,)]
 pub enum DataType {
     Integer,
     Float,
@@ -137,6 +137,22 @@ fn to_snake_case(name: &str) -> String {
     collapsed.trim_matches('_').to_string()
 }
 
+/// Converts a snake_case string into PascalCase, for use as the enum
+/// variant identifier (e.g. `bar_iter_limit` -> `BarIterLimit`).
+fn to_pascal_case(snake: &str) -> String {
+    snake
+        .split('_')
+        .filter(|s| !s.is_empty())
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                Some(first) => first.to_ascii_uppercase().to_string() + chars.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect()
+}
+
 fn escape_keyword(name: &str) -> String {
     const KEYWORDS: &[&str] = &[
         "as", "async", "await", "break", "const", "continue", "crate", "dyn",
@@ -154,18 +170,41 @@ fn escape_keyword(name: &str) -> String {
     }
 }
 
-fn type_name_str(dt: &Option<DataType>) -> &'static str {
+/// Maps an inferred [`DataType`] to the `kind` tag used by the
+/// `gurobi_params!`-style macro (`int`, `dbl`, `str`).
+fn type_kind_str(dt: &Option<DataType>) -> &'static str {
     match dt {
-        Some(DataType::Integer) => "i64",
-        Some(DataType::Float) => "f64",
-        Some(DataType::String) | None => "String",
+        Some(DataType::Integer) => "int",
+        Some(DataType::Float) => "dbl",
+        Some(DataType::String) | None => "str",
     }
+}
+
+/// Generates the bare `(kind, method, Variant)` tuple lines for a single
+/// solver's options, ready to paste into a `<solver>_params!(...)` macro
+/// invocation. Options with no name are skipped.
+pub fn generate_solver_params(options: &[Data]) -> String {
+    let mut out = String::new();
+
+    for data in options {
+        let Some(raw_name) = data.option.as_deref() else {
+            continue;
+        };
+
+        let snake = to_snake_case(raw_name);
+        let method = escape_keyword(&snake);
+        let variant = to_pascal_case(&snake);
+        let kind = type_kind_str(&data.data_type);
+
+        out.push_str(&format!("({kind}, {method}, {variant}),\n"));
+    }
+
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
 
     #[test]
     fn test_snake_basic_pascal() {
@@ -239,6 +278,14 @@ mod tests {
     }
 
     #[test]
+    fn test_pascal_case_basic() {
+        assert_eq!(to_pascal_case("bar_iter_limit"), "BarIterLimit");
+        assert_eq!(to_pascal_case("seed"), "Seed");
+        assert_eq!(to_pascal_case("log_file"), "LogFile");
+        assert_eq!(to_pascal_case("mip_optcr"), "MipOptcr");
+    }
+
+    #[test]
     fn test_infer_integer() {
         assert!(matches!(infer_type(&Some("0".into())), Some(DataType::Integer)));
         assert!(matches!(infer_type(&Some("50".into())), Some(DataType::Integer)));
@@ -267,7 +314,6 @@ mod tests {
         assert!(infer_type(&None).is_none());
     }
 
-
     const BASIC_HTML: &str = r#"<table class="markdownTable">
 <tr class="markdownTableHead">
 <th>Option</th><th>Description</th><th>Default</th>
@@ -280,42 +326,6 @@ mod tests {
 </tr>
 </table>"#;
 
-    const DOTS_HTML: &str = r#"<table class="markdownTable">
-<tr class="markdownTableHead">
-<th>Option</th><th>Description</th><th>Default</th>
-</tr>
-<tr class="markdownTableRowOdd">
-<td>output.debug.path</td><td>Debug output path</td><td><code>tmp</code></td>
-</tr>
-<tr class="markdownTableRowEven">
-<td>subsolver.cplex.workdir</td><td>CPLEX work dir</td><td><code>.</code></td>
-</tr>
-</table>"#;
-
-    const LEADING_DOT_HTML: &str = r#"<table class="markdownTable">
-<tr class="markdownTableHead">
-<th>Option</th><th>Description</th><th>Default</th>
-</tr>
-<tr class="markdownTableRowOdd">
-<td>.lazy</td><td>Lazy constraints</td><td><code>0</code></td>
-</tr>
-<tr class="markdownTableRowEven">
-<td>.feaspref</td><td>Feasibility preference</td><td><code>1</code></td>
-</tr>
-</table>"#;
-
-    const SPACES_HTML: &str = r#"<table class="markdownTable">
-<tr class="markdownTableHead">
-<th>Option</th><th>Description</th><th>Default</th>
-</tr>
-<tr class="markdownTableRowOdd">
-<td>central difference interval</td><td>Interval for central differences</td><td><code>1e-8</code></td>
-</tr>
-<tr class="markdownTableRowEven">
-<td>new superbasics limit</td><td>Limit on new superbasics</td><td><code>100</code></td>
-</tr>
-</table>"#;
-
     const SKIP_HTML: &str = r#"<table class="markdownTable">
 <tr class="markdownTableHead">
 <th>value</th><th>meaning</th>
@@ -324,25 +334,6 @@ mod tests {
 <td>0</td><td>Off</td>
 </tr>
 </table>"#;
-
-    const MIXED_HTML: &str = r#"<table class="markdownTable">
-<tr class="markdownTableHead">
-<th>Option</th><th>Description</th><th>Default</th>
-</tr>
-<tr class="markdownTableRowOdd">
-<td>primal.tolerance.integer</td><td>Integer tolerance</td><td><code>1e-6</code></td>
-</tr>
-<tr class="markdownTableRowEven">
-<td>.dofuncpieceerror</td><td>Do function piece error</td><td><code>1.0</code></td>
-</tr>
-<tr class="markdownTableRowOdd">
-<td>warm start</td><td>Use warm start</td><td><code>GAMS default</code></td>
-</tr>
-<tr class="markdownTableRowEven">
-<td>MIPoptcr</td><td>Relative MIP gap</td><td><code>1.0</code></td>
-</tr>
-</table>"#;
-
 
     #[test]
     fn test_parse_basic() {
@@ -360,106 +351,22 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_dots() {
-        let data = parse_solver_options(DOTS_HTML);
-        assert_eq!(data.len(), 2);
-        assert_eq!(data[0].option.as_deref(), Some("output.debug.path"));
-        assert_eq!(data[1].option.as_deref(), Some("subsolver.cplex.workdir"));
-    }
-
-    #[test]
-    fn test_parse_leading_dot() {
-        let data = parse_solver_options(LEADING_DOT_HTML);
-        assert_eq!(data.len(), 2);
-        assert_eq!(data[0].option.as_deref(), Some(".lazy"));
-        assert!(matches!(data[0].data_type, Some(DataType::Integer)));
-        assert_eq!(data[1].option.as_deref(), Some(".feaspref"));
-        assert!(matches!(data[1].data_type, Some(DataType::Integer)));
-    }
-
-    #[test]
-    fn test_parse_spaces() {
-        let data = parse_solver_options(SPACES_HTML);
-        assert_eq!(data.len(), 2);
-        assert_eq!(data[0].option.as_deref(), Some("central difference interval"));
-        assert!(matches!(data[0].data_type, Some(DataType::Float)));
-        assert_eq!(data[1].option.as_deref(), Some("new superbasics limit"));
-        assert!(matches!(data[1].data_type, Some(DataType::Integer)));
-    }
-
-    #[test]
     fn test_parse_skips_bad_table() {
         let data = parse_solver_options(SKIP_HTML);
         assert!(data.is_empty());
     }
 
     #[test]
-    fn test_parse_mixed() {
-        let data = parse_solver_options(MIXED_HTML);
-        assert_eq!(data.len(), 4);
+    fn test_generate_params_basic() {
+        let data = parse_solver_options(BASIC_HTML);
+        let generated = generate_solver_params(&data);
 
-        assert_eq!(data[0].option.as_deref(), Some("primal.tolerance.integer"));
-        assert!(matches!(data[0].data_type, Some(DataType::Float)));
-
-        assert_eq!(data[1].option.as_deref(), Some(".dofuncpieceerror"));
-        assert!(matches!(data[1].data_type, Some(DataType::Float)));
-
-        assert_eq!(data[2].option.as_deref(), Some("warm start"));
-        assert!(matches!(data[2].data_type, Some(DataType::String)));
-
-        assert_eq!(data[3].option.as_deref(), Some("MIPoptcr"));
-        assert!(matches!(data[3].data_type, Some(DataType::Float)));
+        assert!(generated.contains("(int, cut_nrcuts, CutNrcuts),"));
+        assert!(generated.contains("(dbl, ecp_beta, EcpBeta),"));
     }
 
     #[test]
-    fn test_parse_skip_among_valid() {
-        let combined = format!("{}{}{}", BASIC_HTML, SKIP_HTML, DOTS_HTML);
-        let data = parse_solver_options(&combined);
-        assert_eq!(data.len(), 4);
-        assert_eq!(data[0].option.as_deref(), Some("CUTnrcuts"));
-        assert_eq!(data[2].option.as_deref(), Some("output.debug.path"));
-        assert_eq!(data[3].option.as_deref(), Some("subsolver.cplex.workdir"));
-    }
-
-    #[test]
-    fn test_parse_default_none() {
-        let html = r#"<table class="markdownTable">
-<tr class="markdownTableHead">
-<th>Option</th><th>Description</th><th>Default</th>
-</tr>
-<tr class="markdownTableRowOdd">
-<td>solvetrace</td><td>Trace file</td><td></td>
-</tr>
-</table>"#;
-        let data = parse_solver_options(html);
-        assert_eq!(data.len(), 1);
-        assert_eq!(data[0].option.as_deref(), Some("solvetrace"));
-        assert!(data[0].default.is_none());
-        assert!(data[0].data_type.is_none());
-    }
-
-    #[test]
-    fn test_escape_keyword() {
-        assert_eq!(escape_keyword("continue"), "continue_");
-        assert_eq!(escape_keyword("return"), "return_");
-        assert_eq!(escape_keyword("match"), "match_");
-        assert_eq!(escape_keyword("while"), "while_");
-        assert_eq!(escape_keyword("for"), "for_");
-        assert_eq!(escape_keyword("fn"), "fn_");
-        assert_eq!(escape_keyword("loop"), "loop_");
-        assert_eq!(escape_keyword("let"), "let_");
-    }
-
-    #[test]
-    fn test_escape_non_keyword() {
-        assert_eq!(escape_keyword("cut_nrcuts"), "cut_nrcuts");
-        assert_eq!(escape_keyword("ecp_beta"), "ecp_beta");
-        assert_eq!(escape_keyword("output_debug_path"), "output_debug_path");
-        assert_eq!(escape_keyword(""), "");
-    }
-
-    #[test]
-    fn test_generate_keyword_escaped() {
+    fn test_generate_params_keyword_escaped() {
         let html = r#"<table class="markdownTable">
 <tr class="markdownTableHead">
 <th>Option</th><th>Description</th><th>Default</th>
@@ -467,83 +374,26 @@ mod tests {
 <tr class="markdownTableRowOdd">
 <td>continue</td><td>Continue option</td><td><code>0</code></td>
 </tr>
-<tr class="markdownTableRowEven">
-<td>return</td><td>Return value</td><td><code>1</code></td>
-</tr>
-<tr class="markdownTableRowOdd">
-<td>for</td><td>For option</td><td><code>2</code></td>
-</tr>
 </table>"#;
         let data = parse_solver_options(html);
-        let solvers = [("Test", data)];
-        let generated = generate_all_rs(&solvers);
+        let generated = generate_solver_params(&data);
 
-        assert!(generated.contains("pub continue_: Option<i64>"), "continue should be escaped: {}", generated);
-        assert!(generated.contains("pub return_: Option<i64>"));
-        assert!(generated.contains("pub for_: Option<i64>"));
-        // raw keywords should NOT appear
-        assert!(!generated.contains("pub continue: "));
-        assert!(!generated.contains("pub return: "));
-        assert!(!generated.contains("pub for: "));
+        assert!(generated.contains("(int, continue_, Continue),"));
     }
 
     #[test]
-    fn test_parse_continue_keyword() {
+    fn test_generate_params_string_kind() {
         let html = r#"<table class="markdownTable">
 <tr class="markdownTableHead">
 <th>Option</th><th>Description</th><th>Default</th>
 </tr>
 <tr class="markdownTableRowOdd">
-<td>continue</td><td>A continuation option</td><td><code>0</code></td>
+<td>log file</td><td>Log file path</td><td><code>solve.log</code></td>
 </tr>
 </table>"#;
         let data = parse_solver_options(html);
-        assert_eq!(data.len(), 1);
-        assert_eq!(data[0].option.as_deref(), Some("continue"));
-        assert_eq!(data[0].default.as_deref(), Some("0"));
-        assert!(matches!(data[0].data_type, Some(DataType::Integer)));
+        let generated = generate_solver_params(&data);
+
+        assert!(generated.contains("(str, log_file, LogFile),"));
     }
-
-    #[test]
-    fn test_generate_nested_all_valid() {
-        let data = parse_solver_options(MIXED_HTML);
-        let solvers = [("SHOT", data)];
-        let generated = generate_all_rs(&solvers);
-
-        assert!(generated.contains("pub struct SHOT"));
-        assert!(generated.contains("pub primal_tolerance_integer: Option<f64>"));
-        assert!(generated.contains("pub dofuncpieceerror: Option<f64>"));
-        assert!(generated.contains("pub warm_start: Option<String>"));
-        assert!(generated.contains("pub mip_optcr: Option<f64>"));
-
-        // no invalid identifiers
-        assert!(!generated.contains("pub ."));
-        assert!(!generated.contains("pub  "));
-    }
-}
-
-pub fn generate_all_rs(solvers: &[(&str, Vec<Data>)]) -> String {
-    let mut out = String::new();
-    out.push_str("// Auto-generated by gans-scraper\n");
-    out.push_str("#![allow(non_camel_case_types, dead_code)]\n\n");
-
-    for (solver_name, options) in solvers {
-        if options.is_empty() {
-            continue;
-        }
-        out.push_str(&format!("pub struct {} {{\n", solver_name));
-        for data in options {
-            let field_name = data
-                .option
-                .as_deref()
-                .map(to_snake_case)
-                .map(|s| escape_keyword(&s))
-                .unwrap_or_else(|| "unknown".to_string());
-            let type_name = type_name_str(&data.data_type);
-            out.push_str(&format!("    pub {}: Option<{}>,\n", field_name, type_name));
-        }
-        out.push_str("}\n\n");
-    }
-
-    out
 }

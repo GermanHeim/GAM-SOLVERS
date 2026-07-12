@@ -5,27 +5,32 @@ mod utils;
 
 use constants::*;
 use fetch::*;
+use parse::generate_solver_params;
+
 
 #[tokio::main]
 async fn main() {
-    let mut all_data: Vec<(&str, Vec<Data>)> = Vec::new();
+    supported_solvers! {
+        BARON => "BARON";
+        GUROBI => "GUROBI";
+        HIGHS => "HIGHS";
+    }
+    
+    for &solver in SupportedSolver::ALL {
 
-    for i in SOLVERS {
-        let link = format!("{}S_{}.html", BASE_URL, i,);
-        println!("Fetching: {}", link);
+        let link = format!("{BASE_URL}S_{}.html", solver.url_name());
+        eprintln!("Fetching: {link}");
+
         match scrape_gams_solvers(&link).await {
             Ok(data) => {
-                println!("  -> {} options", data.len());
-                all_data.push((i, data));
+                eprintln!("  -> {} options", data.len());
+                let params = generate_solver_params(&data);
+                println!("// {:?}", solver);
+                print!("{params}");
             }
             Err(e) => {
-                eprintln!("  -> Error: {}", e);
+                eprintln!("  -> Error: {e}");
             }
         }
     }
-
-    let generated = parse::generate_all_rs(&all_data);
-    let path = "src/generated.rs";
-    std::fs::write(path, &generated).expect("Failed to write generated file");
-    println!("\nWrote {} structs to {}", all_data.len(), path);
 }
